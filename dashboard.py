@@ -95,15 +95,20 @@ st.sidebar.write(f"**Loaded Samples:** {len(df)}")
 if not df.empty:
   latest_row = df.iloc[0]
 
-  # Extract values safely
+  # Universal column mapping for current/rms and tamper/case_open
   current_rms = float(
-      latest_row.get("current", latest_row.get("current_rms", 0.0))
+      latest_row.get(
+          "current_rms", latest_row.get("current", latest_row.get("current", 0.0))
+      )
   )
-  tamper_status = bool(latest_row.get("case_open", latest_row.get("tamper", 0)))
+  tamper_status = bool(
+      latest_row.get(
+          "case_open", latest_row.get("tamper", latest_row.get("tamper", 0))
+      )
+  )
   relay_status = bool(latest_row.get("relay", 0))
 
-  # --- FIXED ALERT PRIORITY ---
-  # Tamper takes absolute top priority so your physical switch demo is instantly visible
+  # --- Alert Priority ---
   if tamper_status:
     alert_text = "🚨 ALERT: ENCLOSURE TAMPER DETECTED!"
   elif relay_status or current_rms > 60.0:
@@ -111,7 +116,6 @@ if not df.empty:
   else:
     alert_text = "NORMAL"
 
-  # Loss Delta calculation
   unaccounted_loss = round(max(0.0, current_rms - 5.0), 2)
   hash_valid = bool(latest_row.get("hash_valid", 1))
 
@@ -163,10 +167,15 @@ if not df.empty:
   with tab_live:
     st.subheader("Real-time Phase Current Telemetry (Amperes)")
     chart_df = df.sort_values("id")
-    if "timestamp" in chart_df.columns and "current_rms" in chart_df.columns:
-      st.line_chart(chart_df.set_index("timestamp")[["current_rms"]])
-    elif "timestamp" in chart_df.columns and "current" in chart_df.columns:
-      st.line_chart(chart_df.set_index("timestamp")[["current"]])
+    curr_col = (
+        "current_rms"
+        if "current_rms" in chart_df.columns
+        else ("current" if "current" in chart_df.columns else None)
+    )
+    if curr_col and "timestamp" in chart_df.columns:
+      st.line_chart(chart_df.set_index("timestamp")[[curr_col]])
+    else:
+      st.info("Waiting for valid waveform columns...")
 
   with tab_balance:
     st.subheader("Line Current Balance Summary")
@@ -208,12 +217,33 @@ if not df.empty:
   with tab_audit:
     st.subheader("Cryptographic SHA-256 Integrity Ledger")
     ledger_df = df.copy()
+
+    # Normalize columns dynamically so the table never breaks
+    if "current_rms" not in ledger_df.columns:
+      if "current" in ledger_df.columns:
+        ledger_df["current_rms"] = ledger_df["current"]
+      else:
+        ledger_df["current_rms"] = 0.0
+
+    if "case_open" not in ledger_df.columns:
+      if "tamper" in ledger_df.columns:
+        ledger_df["case_open"] = ledger_df["tamper"]
+      else:
+        ledger_df["case_open"] = 0
+
+    if "node_id" not in ledger_df.columns:
+      ledger_df["node_id"] = "NODE_POLE"
+
     if "current_hash" not in ledger_df.columns:
       ledger_df["current_hash"] = ledger_df.apply(
           lambda r: hashlib.sha256(str(r.to_dict()).encode()).hexdigest(),
           axis=1,
       )
 
+    if "hash_valid" not in ledger_df.columns:
+      ledger_df["hash_valid"] = 1
+
+    # Filter columns that exist in the dataframe
     display_cols = [
         c
         for c in [
@@ -224,11 +254,26 @@ if not df.empty:
             "case_open",
             "current_hash",
             "hash_valid",
-            "alert",
         ]
         if c in ledger_df.columns
     ]
-    st.dataframe(ledger_df[display_cols], use_container_width=True)
+
+    st.dataframe(
+        ledger_df[display_cols],
+        column_config={
+            "id": "ID",
+            "timestamp": "Timestamp",
+            "node_id": "Node ID",
+            "current_rms": st.column_config.NumberColumn(
+                "Current (A)", format="%.2f A"
+            ),
+            "case_open": "Case Open",
+            "current_hash": "SHA-256 Hash Signature",
+            "hash_valid": st.column_config.CheckboxColumn("Valid Chain"),
+        },
+        use_container_width=True,
+        hide_index=True,
+    )
 
   # Real-time Auto Refresh
   if auto_refresh:
